@@ -536,6 +536,11 @@ static void pmw3610_async_init(struct k_work *work) {
             data->ready = true; // sensor is ready to work
             LOG_INF("PMW3610 initialized");
             set_interrupt(dev, true);
+
+            /* --- DEBUG: IRQに頼らないポーリング診断を開始 --- */
+            debug_poll_dev = dev;
+            k_work_schedule(&debug_poll_work, K_MSEC(500));
+            /* --- DEBUG ここまで --- */
         } else {
             k_work_schedule(&data->init_work, K_MSEC(async_init_delay[data->async_init_step]));
         }
@@ -747,6 +752,33 @@ static int pmw3610_report_data(const struct device *dev) {
 
     return err;
 }
+
+/* --- DEBUG: IRQ配線を使わず一定間隔でSPIから直接モーションレジスタを読む診断用コード ---
+ * 原因判明後、このブロックと呼び出し箇所(pmw3610_async_init内)を削除すること。
+ */
+static const struct device *debug_poll_dev;
+
+static void pmw3610_debug_poll_handler(struct k_work *work);
+K_WORK_DELAYABLE_DEFINE(debug_poll_work, pmw3610_debug_poll_handler);
+
+static void pmw3610_debug_poll_handler(struct k_work *work) {
+    uint8_t buf[PMW3610_BURST_SIZE];
+    int err = motion_burst_read(debug_poll_dev, buf, sizeof(buf));
+    if (!err) {
+        int16_t raw_x =
+            TOINT16((buf[PMW3610_X_L_POS] + ((buf[PMW3610_XY_H_POS] & 0xF0) << 4)), 12);
+        int16_t raw_y =
+            TOINT16((buf[PMW3610_Y_L_POS] + ((buf[PMW3610_XY_H_POS] & 0x0F) << 8)), 12);
+        int16_t shutter =
+            ((int16_t)(buf[PMW3610_SHUTTER_H_POS] & 0x01) << 8) + buf[PMW3610_SHUTTER_L_POS];
+        LOG_INF("DEBUG POLL: motion=0x%02x raw_x=%d raw_y=%d shutter=%d", buf[0], raw_x, raw_y,
+               shutter);
+    } else {
+        LOG_ERR("DEBUG POLL: motion_burst_read failed: %d", err);
+    }
+    k_work_schedule(&debug_poll_work, K_MSEC(500));
+}
+/* --- DEBUG ここまで --- */
 
 static void pmw3610_gpio_callback(const struct device *gpiob, struct gpio_callback *cb,
                                   uint32_t pins) {
